@@ -44,8 +44,17 @@ namespace Tips.WebServer.Modules
 
             Get["/projects/"] = _ =>
             {
+                var user =
+                    from c in this.Context.CurrentUser.ToMaybe()
+                    from name in c.UserName.ToMaybe()
+                    from u in context.GetUser(x => x.Id == name).FirstOrNothing()
+                    select u;
+
+                if (user.IsNothing)
+                    return HttpStatusCode.BadRequest;
+
                 return
-                    Response.AsJson(context.GetProjects(p => true)
+                    Response.AsJson(context.GetProjectBelongUser(user.Return())
                         .Select(p => MyClass.ToWithRecordsProject(context, p))
                         .ToArray());
             };
@@ -227,7 +236,13 @@ namespace Tips.WebServer.Modules
                     Project.FromJson(this.Request.Body.ToStreamString())
                     .ToMaybe();
 
-                project.On(context.AddProject);
+                var user =
+                    from c in this.Context.CurrentUser.ToMaybe()
+                    from name in c.UserName.ToMaybe()
+                    from u in context.GetUser(x => x.Id == name).FirstOrNothing()
+                    select u;
+
+                project.On(p => context.AddProject(p, user.Return()));
 
                 return Response.AsJson(new { }, project.IsSomething ? HttpStatusCode.OK : HttpStatusCode.InternalServerError);
             };
@@ -237,6 +252,12 @@ namespace Tips.WebServer.Modules
                 //var model = this.Bind<AddTaskComment>();
                 var json = this.Request.Body.ToStreamString();
                 var model = JsonConvert.DeserializeObject<AddTaskComment>(json);
+                var project = context.GetProjectFromTask(model.TaskId);
+                var permission = context.GetAccessProjectPermission(project.Id);
+
+                if (!IsEnableUser(context, permission))
+                    return HttpStatusCode.Forbidden;
+
                 context.AddTaskComment(model.Comment, model.TaskId);
 
                 return Response.AsJson(json, HttpStatusCode.OK);
@@ -244,6 +265,12 @@ namespace Tips.WebServer.Modules
             Post["/task/record/"] = _ =>
             {
                 var model = JsonConvert.DeserializeObject<AddTaskRecord>(this.Request.Body.ToStreamString());
+                var project = context.GetProjectFromTask(model.TaskId);
+                var permission = context.GetAccessProjectPermission(project.Id);
+
+                if (!IsEnableUser(context, permission))
+                    return HttpStatusCode.Forbidden;
+
                 context.AddTaskRecord(model.Record, model.TaskId);
 
                 return Response.AsJson(new { }, HttpStatusCode.OK);
@@ -321,6 +348,10 @@ namespace Tips.WebServer.Modules
             {
                 var res = Response.AsJson(new { }, HttpStatusCode.OK);
                 var model = JsonConvert.DeserializeObject<SaveTasksStatus>(this.Request.Body.ToStreamString());
+                var permission = context.GetAccessProjectPermission(model.ProjectId);
+
+                if (!IsEnableUser(context, permission))
+                    return HttpStatusCode.Forbidden;
 
                 var query =
                     from task in context.GetTaskRecords(a => true)
@@ -376,11 +407,39 @@ namespace Tips.WebServer.Modules
                 var userId = jObj["userId"].Value<string>();
                 var user =
                     context.GetUser(x => x.Id == userId).FirstOrDefault();
+                var permission =
+                    context.GetAddProjectMemberPermission();
 
                 if (user == default(IUser))
-                    return Response.AsJson(new { }, HttpStatusCode.BadRequest);
+                    return HttpStatusCode.BadRequest;
+
+                if (!IsEnableUser(context, permission))
+                    return HttpStatusCode.Forbidden;
 
                 context.AddProjectMember(user, projectId);
+
+                return
+                    Response.AsJson(new { }, HttpStatusCode.OK);
+            };
+            
+            Post["/project/members/delete"] = prms =>
+            {
+                var json = this.Request.Body.ToStreamString();
+                var jObj = JObject.Parse(json);
+                var projectId = jObj["projectId"].Value<int>();
+                var userId = jObj["userId"].Value<string>();
+                var user =
+                    context.GetUser(x => x.Id == userId).FirstOrDefault();
+                var permission =
+                    context.GetDeleteProjectMemberPermission();
+
+                if (user == default(IUser))
+                    return HttpStatusCode.BadRequest;
+                
+                if (!IsEnableUser(context, permission))
+                    return HttpStatusCode.Forbidden;
+
+                context.DeleteProjectMember(user, projectId);
 
                 return
                     Response.AsJson(new { }, HttpStatusCode.OK);
@@ -395,7 +454,7 @@ namespace Tips.WebServer.Modules
                 from user in
                     (from u in context.GetUser(x => x.Id.Equals(name))
                      select u).FirstOrNothing()
-                where permission.IsPermittedDelete(user)
+                where permission.IsPermittedUser(user)
                 select true;
 
             return
